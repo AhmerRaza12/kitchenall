@@ -1,0 +1,6 @@
+
+app.py
+Data_extraction/excel_file/
+Data_extraction/functions/image_files/
+Data_extraction/functions/pdf_files/
+Data_extraction/functions/.env
