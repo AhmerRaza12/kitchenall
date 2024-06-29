@@ -14,12 +14,12 @@ from PIL import Image, ImageFile
 import io
 from spire.pdf.common import *
 from spire.pdf import *
+import pymupdf
 
 dotenv.load_dotenv()
 openai_api_key = str(os.getenv("OPENAI_API_KEY"))
-print(openai_api_key)
 client = openai.Client(api_key=openai_api_key)
-MODEL = "GPT-4o"
+MODEL = "gpt-4o"
 
 def download_pdf(url):
     response = requests.get(url)
@@ -34,12 +34,7 @@ def download_pdf(url):
     
     return pdf_path
 
-# download_pdf(urls)
-
-# for the first five pdfs we need to extract the text from the first five pdfs
-
 ImageFile.LOAD_TRUNCATED_IMAGES = True
-
 def capture_screenshots(pdf_path):
     try:
         pdf_file = fitz.open(pdf_path)
@@ -58,7 +53,16 @@ def capture_screenshots(pdf_path):
                 bottom_margin = page_height - top_margin
             
                 screenshot_rect = fitz.Rect(0, top_margin, page_width // 2, bottom_margin)
-                image_path = f"image_files/page_{page_number+1}_image_1.jpg"
+                filename = os.path.basename(pdf_path)
+                # remove the extension
+                filename = os.path.splitext(filename)[0]
+                print(filename)
+                # images should be saved in image_files/filename/page_number_image_1.jpg
+                if not os.path.exists(f"image_files/{filename}"):
+                    os.makedirs(f"image_files/{filename}")
+
+                image_path = f"image_files/{filename}/image_1.jpg"
+
                 
         
                 pixmap = page.get_pixmap()
@@ -74,8 +78,6 @@ def capture_screenshots(pdf_path):
                 reduced_height = page_height * 0.8
                 top_margin = (page_height - reduced_height) / 2
                 bottom_margin = page_height - top_margin
-                
-                # Right half of the second page, divided into two halves
                 right_half_width = page_width // 2
                 screenshot_rect_1 = fitz.Rect(right_half_width, top_margin, page_width, top_margin + reduced_height / 2)
                 screenshot_rect_2 = fitz.Rect(right_half_width, top_margin + reduced_height / 2, page_width, bottom_margin)
@@ -86,18 +88,18 @@ def capture_screenshots(pdf_path):
                 
                 # Crop and save top half of the right side
                 img_cropped_1 = img.crop((screenshot_rect_1.x0, screenshot_rect_1.y0, screenshot_rect_1.x1, screenshot_rect_1.y1))
-                image_path_1 = f"image_files/page_{page_number+1}_image_2.jpg"
+                image_path_1 = f"image_files/{filename}/image_2.jpg"
                 img_cropped_1.save(image_path_1)
                 print(f"Image saved: {image_path_1}")
 
                 # Crop and save bottom half of the right side
                 img_cropped_2 = img.crop((screenshot_rect_2.x0, screenshot_rect_2.y0, screenshot_rect_2.x1, screenshot_rect_2.y1))
-                image_path_2 = f"image_files/page_{page_number+1}_image_3.jpg"
+                image_path_2 = f"image_files/{filename}/image_3.jpg"
                 img_cropped_2.save(image_path_2)
                 print(f"Image saved: {image_path_2}")
 
             else:
-                break  # Only handle the first two pages as per your requirement
+                break  
 
         pdf_file.close()
     
@@ -126,16 +128,17 @@ def upload_image_to_freeimage(image_path, api_key):
         else:
             raise Exception(f"Failed to upload image: {response.status_code} {response.text}")
 
-def generate_image_links(api_key):
-    image_files = ["image_files/page_1_image_1.jpg", "image_files/page_2_image_2.jpg", "image_files/page_2_image_3.jpg"]
-    image_links = {}
+def generate_image_links(api_key,pdf_path):
+    filename = os.path.basename(pdf_path)
+    filename = os.path.splitext(filename)[0]
+    image_files = [f"image_files/{filename}/image_1.jpg", f"image_files/{filename}/image_2.jpg", f"image_files/{filename}/image_3.jpg"]
+    image_links = []
 
     for image_file in image_files:
         if os.path.exists(image_file):
             try:
                 link = upload_image_to_freeimage(image_file, api_key)
-                image_links[image_file] = link
-                print(f"Uploaded {image_file} to {link}")
+                image_links.append(link)
             except Exception as e:
                 print(f"Error uploading {image_file}: {e}")
         else:
@@ -147,10 +150,8 @@ def extract_text_from_pdf(pdf_path):
     text = ""
     try:
         doc = fitz.open(pdf_path)
-        # Extract text from each page
-        for page_num in range(len(doc)):
-            page = doc.load_page(page_num)
-            text += page.get_text()
+        page = doc.load_page(0)
+        text = page.get_text()
         doc.close()
     except Exception as e:
         print(f"Error extracting text from PDF: {e}")
@@ -160,11 +161,7 @@ def process_text(text, code):
     lines = text.split('\n')
     name = None
     features = []
-    specification_lines = []
     features_started = False
-    specification_started = False
-    electrical_found = False
-    
     for line in lines:
         line = line.strip()
         if not line:
@@ -177,58 +174,17 @@ def process_text(text, code):
                 features.append(line.strip("• ").strip())
             else:
                 features_started = False
-            
-        # Extract specification section
-        if "CONSTRUCTION" in line:
-            specification_started = True
-        if specification_started:
-            if "ELECTRICAL" in line:
-                electrical_found = True
-            specification_lines.append(line.strip())
-            if electrical_found and "COOKING" in line:
-                break
-            if electrical_found and not "COOKING" in line and "USR Brands" in line:
-                specification_lines.pop()
-                break
-
-    specification_text = '\n'.join(specification_lines).strip()
-
     for line in lines:
         if line.startswith(code) or code in line:
             name = line.strip()
             break
-
-    return name, features,specification_text
-
+    return name, features
 
 
-# I want to parse the specification to gpt-4o model to extract the specifications in html table
-def pdf_to_image(pdf_path, output_dir="image_files", dpi=300, page_numbers=None):
-    try:
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-        
-        if page_numbers is None:
-            page_numbers = [0]  # Default to convert only the first page if not specified
-        
-        image_paths = []
-        images = convert_from_path(pdf_path, dpi=dpi, first_page=min(page_numbers), last_page=max(page_numbers))
-
-        for i, image in enumerate(images):
-            image_path = os.path.join(output_dir, f"{os.path.basename(pdf_path).replace('.pdf', f'_{i+1}.png')}")
-            image.save(image_path, 'PNG')
-            print(f"Saved image: {image_path}")
-            image_paths.append(image_path)
-        
-        return image_paths
-
-    except Exception as e:
-        print(f"Error converting PDF to image: {e}")
-        return []
+ 
 def extract_specifications(specification):
     try:
-        print(f"Extracting specifications: {specification}")
-        specification_text = specification.replace("\n", " ").strip()    
+        specification_text = "\n".join(specification)
         messages = [
             {"role": "system", "content": "Extract specifications in HTML table format. no th headings just td tags in table"},
             {"role": "user", "content": specification_text}
@@ -244,9 +200,9 @@ def extract_specifications(specification):
     except Exception as e:
         print(f"Error extracting specifications: {e}")
         return "Error extracting specifications."
+    
 def extract_features_list(features):
     try:
-        print(f"Extracting features: {features}")
         features_text = "\n".join([f"- {feature}" for feature in features])
         messages = [
             {"role": "system", "content": "Extract features in HTML list format. Use 'li' tags for each feature inside the ul Features."},
@@ -266,9 +222,8 @@ def extract_features_list(features):
 
 def extract_description(raw_text):
     try:
-        print(f"Extracting description: {raw_text}")
         messages = [
-            {"role": "system", "content": "Extract the description of the product. The description should be in a single paragraph. and not more than 5 lines see the text and extract description."},
+            {"role": "system", "content": "Extract the description of the product. The description should be in a single paragraph. and not more than 4 lines see the text and extract description."},
             {"role": "user", "content": raw_text}
         ]
         response = client.chat.completions.create(
@@ -282,43 +237,68 @@ def extract_description(raw_text):
     except Exception as e:
         print(f"Error extracting description: {e}")
         return "Error extracting description."
+    
+def extract_specification_from_table(pdf_path):
+    try:
+        specifications=[]
+        doc = fitz.open(pdf_path)
+        page = doc.load_page(1)
+        tables = page.find_tables()
 
-def update_excel_row(file_path, row_index, name, description, features, specifications):
+        if tables:
+            for i, tab in enumerate(tables):
+                if i == 0:
+                    continue
+                table_content = tab.extract()
+                for table_row in table_content:
+                    for cell in table_row:           
+                        if cell and cell != '':
+                            specifications.append(cell)
+                            
+        else:
+            print("No tables found.")
+        doc.close()
+    except Exception as e:
+        print(f"Error extracting table: {e}")
+    return specifications
+
+def update_excel_row(file_path, row_index, name, description, features, specifications,image_links):
     try:
         df = pd.read_excel(file_path)
         df.at[row_index, 'Name'] = name
-        df.at[row_index, 'Description'] = description
         df.at[row_index, 'Features'] = features
+        df.at[row_index, 'Description'] = description
         df.at[row_index, 'Specifications'] = specifications
+        df.at[row_index, 'Image 1'] = image_links[0] if len(image_links) > 0 else None
+        df.at[row_index, 'Image 2'] = image_links[1] if len(image_links) > 1 else None
+        df.at[row_index, 'Image 3'] = image_links[2] if len(image_links) > 2 else None
         df.to_excel(file_path, index=False)
         print(f"Updated Excel row {row_index} successfully.")
     except Exception as e:
         print(f"Error updating Excel row {row_index}: {e}")
 
+
+
 if __name__ == "__main__":
     file_path = 'C:/Work/upwork/price-scraper/Data_extraction/excel_file/USR.xlsx'
     df = pd.read_excel(file_path)
-    # pdf_path = 'pdf_files/bd250-specsheet.pdf'
-    # capture_screenshots(pdf_path)
     images_api_key = str(os.getenv("IMAGES_API_KEY"))
-    print(images_api_key)
-    # image_links = generate_image_links(images_api_key)
-    # print("Image Links:", image_links)
-    # filtered_df = df[df['Specsheet'].notna()]
-    # max_rows_to_process = 5  
+    filtered_df = df[df['Specsheet'].notna()]
+    max_rows_to_process = 5  
+    for idx, row in filtered_df.head(max_rows_to_process).iterrows():
+        pdf_url = row['Specsheet']
+        pdf_path = download_pdf(pdf_url)
+        code = row['SKU']
+        capture_screenshots(pdf_path)
+        image_links = generate_image_links(images_api_key,pdf_path)
+        raw_text = extract_text_from_pdf(pdf_path)
+        name, features = process_text(raw_text, code)
+        specification = extract_specification_from_table(pdf_path)
+        description = extract_description(raw_text)
+        specifications = extract_specifications(specification)
+        features_html_list = extract_features_list(features)
 
-    # for idx, row in filtered_df.head(max_rows_to_process).iterrows():
-    #     pdf_url = row['Specsheet']
-    #     pdf_path = download_pdf(pdf_url)
-    #     code = row['SKU']
-
-    #     raw_text = extract_text_from_pdf(pdf_path)
-    #     name, features, specification = process_text(raw_text, code)
-    #     description = extract_description(raw_text)
-    #     specifications = extract_specifications(specification)
-    #     features_html_list = extract_features_list(features)
-
-    #     update_excel_row(file_path, idx, name, description, features_html_list, specifications)
+        update_excel_row(file_path, idx, name, description, features_html_list, specifications,image_links)
 
 
 
