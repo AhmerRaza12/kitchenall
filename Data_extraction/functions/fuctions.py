@@ -159,7 +159,6 @@ def extract_text_from_pdf(pdf_path):
 
 def process_text(text, code):
     lines = text.split('\n')
-    name = None
     features = []
     features_started = False
     for line in lines:
@@ -174,11 +173,7 @@ def process_text(text, code):
                 features.append(line.strip("• ").strip())
             else:
                 features_started = False
-    for line in lines:
-        if line.startswith(code) or code in line:
-            name = line.strip()
-            break
-    return name, features
+    return features
 
 
  
@@ -277,11 +272,27 @@ def update_excel_row(file_path, row_index, name, description, features, specific
     except Exception as e:
         print(f"Error updating Excel row {row_index}: {e}")
 
-
+def extract_name(pdf_path):
+    try:
+        doc = fitz.open(pdf_path)
+        page = doc.load_page(0)
+        page_height = page.rect.height
+        top_margin = page_height * 0.1
+        bottom_margin = page_height * 0.2
+        screenshot_rect = fitz.Rect(0, top_margin, page.rect.width, bottom_margin)
+        text = page.get_text("text", clip=screenshot_rect)
+        doc.close()
+        text = text.split("\n")
+        name = text[0]
+    except Exception as e:
+        print(f"Error extracting name: {e}")
+        name = " "
+    return name
 
 if __name__ == "__main__":
     file_path = 'C:/Work/upwork/price-scraper/Data_extraction/excel_file/USR.xlsx'
     df = pd.read_excel(file_path)
+   
     images_api_key = str(os.getenv("IMAGES_API_KEY"))
     filtered_df = df[df['Specsheet'].notna()]
     max_rows_to_process = 5  
@@ -292,7 +303,8 @@ if __name__ == "__main__":
         capture_screenshots(pdf_path)
         image_links = generate_image_links(images_api_key,pdf_path)
         raw_text = extract_text_from_pdf(pdf_path)
-        name, features = process_text(raw_text, code)
+        name = extract_name(pdf_path)
+        features = process_text(raw_text, code)
         specification = extract_specification_from_table(pdf_path)
         description = extract_description(raw_text)
         specifications = extract_specifications(specification)
