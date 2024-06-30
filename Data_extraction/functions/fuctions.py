@@ -35,6 +35,36 @@ def download_pdf(url):
     return pdf_path
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+def extract_images_from_pdf(pdf_path):
+    try:
+        pdf_file = fitz.open(pdf_path)
+        if not os.path.exists("image_files"):
+            os.makedirs("image_files")
+
+        for page_number in range(len(pdf_file)):
+            page = pdf_file.load_page(page_number)
+            page_width = page.rect.width
+            page_height = page.rect.height
+            screenshot_rect = fitz.Rect(0, 0, page_width, page_height)
+            filename = os.path.basename(pdf_path)
+            # remove the extension
+            filename = os.path.splitext(filename)[0]
+            print(filename)
+            # images should be saved in image_files/filename/page_number_image.jpg
+            if not os.path.exists(f"image_files/{filename}"):
+                os.makedirs(f"image_files/{filename}")
+
+            image_path = f"image_files/{filename}/{page_number}_image.jpg"
+
+            pixmap = page.get_pixmap()
+            img = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+            img.save(image_path)
+            print(f"Image saved: {image_path}")
+
+        pdf_file.close()
+    
+    except Exception as e:
+        print(f"Error extracting images from PDF: {e}")
 def capture_screenshots(pdf_path):
     try:
         pdf_file = fitz.open(pdf_path)
@@ -157,31 +187,12 @@ def extract_text_from_pdf(pdf_path):
         print(f"Error extracting text from PDF: {e}")
     return text
 
-def process_text(text, code):
-    lines = text.split('\n')
-    features = []
-    features_started = False
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        if "FEATURES" in line:
-            features_started = True
-            continue
-        if features_started:
-            if line.startswith("•"):
-                features.append(line.strip("• ").strip())
-            else:
-                features_started = False
-    return features
-
-
  
 def extract_specifications(specification):
     try:
         specification_text = "\n".join(specification)
         messages = [
-            {"role": "system", "content": "Extract specifications in HTML table format. no th headings just td tags in table"},
+            {"role": "system", "content": "Extract specifications in HTML table format carefully as the cell maybe out of order. no th headings just td tags in table and all td tags should have some content Inner text.  If 2 first td's in a tr have same name then make only one tr and put the second tds in the same place with br tag. If found multiple SKU's or products, keep them in separate tables each with their own specifications. If there is no table found in the input, return 'None' as the output."},
             {"role": "user", "content": specification_text}
         ]
         response = client.chat.completions.create(
@@ -196,12 +207,11 @@ def extract_specifications(specification):
         print(f"Error extracting specifications: {e}")
         return "Error extracting specifications."
     
-def extract_features_list(features):
+def extract_features_list(raw_text):
     try:
-        features_text = "\n".join([f"- {feature}" for feature in features])
         messages = [
-            {"role": "system", "content": "Extract features in HTML list format. Use 'li' tags for each feature inside the ul Features."},
-            {"role": "user", "content": features_text}
+            {"role": "system", "content": "Extract features in HTML list format. Use 'li' tags for each feature inside the ul Features. In the raw text, the features are listed in bullet points. Extract the features and present them in an HTML list. If there are multiple products or SKUs, extract the features for the given product only. If the features are not in bullet points, generate them as bullet points. Not more than 10 features. Return each li in a ul format."},
+            {"role": "user", "content": raw_text}
         ]
         response = client.chat.completions.create(
             model=MODEL,
@@ -233,46 +243,92 @@ def extract_description(raw_text):
         print(f"Error extracting description: {e}")
         return "Error extracting description."
     
+def extract_name_from_ai(raw_text):
+    try:
+        messages = [
+            {"role": "system", "content": "Extract the name of the product. If you cannot find the name from the text provided, generate it with Company Name + Model Number + Product Type(Any Machine or something else)  + Voltage(If found)"},
+            {"role": "user", "content": raw_text}
+        ]
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            temperature=0.0  
+        )
+        name = response.choices[0].message.content
+        
+        return name  
+    except Exception as e:
+        print(f"Error extracting name: {e}")
+        return "Error extracting name."
+    
 def extract_specification_from_table(pdf_path):
     try:
-        specifications=[]
+        specifications = []
         doc = fitz.open(pdf_path)
-        page = doc.load_page(1)
-        tables = page.find_tables()
 
-        if tables:
-            for i, tab in enumerate(tables):
-                if i == 0:
-                    continue
-                table_content = tab.extract()
-                for table_row in table_content:
-                    for cell in table_row:           
-                        if cell and cell != '':
-                            specifications.append(cell)
-                            
-        else:
-            print("No tables found.")
+        def extract_tables_from_page(page):
+            tables = page.find_tables()
+            if tables:
+                for i, tab in enumerate(tables):
+                    if i == 0:
+                        continue
+                    table_content = tab.extract()
+                    for table_row in table_content:
+                        for cell in table_row:
+                            if cell and cell.strip() != '':
+                                specifications.append(cell)
+            else:
+                print("No tables found on page.")
+
+        # Extract tables from the first page
+        first_page = doc.load_page(0)
+        extract_tables_from_page(first_page)
+
+        # If no tables found on the first page, try the second page
+        if not specifications and len(doc) > 1:
+            second_page = doc.load_page(1)
+            extract_tables_from_page(second_page)
+
         doc.close()
+        
+        if not specifications:
+            print("No tables found in the first two pages.")
+            
     except Exception as e:
         print(f"Error extracting table: {e}")
+
     return specifications
 
-def update_excel_row(file_path, row_index, name, description, features, specifications,image_links):
+def update_excel_row(file_path, row_index, name, description, features, specifications):
     try:
         df = pd.read_excel(file_path)
         df.at[row_index, 'Name'] = name
         df.at[row_index, 'Features'] = features
         df.at[row_index, 'Description'] = description
         df.at[row_index, 'Specifications'] = specifications
-        df.at[row_index, 'Image 1'] = image_links[0] if len(image_links) > 0 else None
-        df.at[row_index, 'Image 2'] = image_links[1] if len(image_links) > 1 else None
-        df.at[row_index, 'Image 3'] = image_links[2] if len(image_links) > 2 else None
         df.to_excel(file_path, index=False)
         print(f"Updated Excel row {row_index} successfully.")
     except Exception as e:
         print(f"Error updating Excel row {row_index}: {e}")
 
-def extract_name(pdf_path):
+def extract_name_method_1(pdf_path):
+    try:
+        doc = fitz.open(pdf_path)
+        page = doc.load_page(0)
+        page_height = page.rect.height
+        top_margin = page_height * 0.2
+        bottom_margin = page_height * 0.3
+        screenshot_rect = fitz.Rect(0, top_margin, page.rect.width, bottom_margin)
+        text = page.get_text("text", clip=screenshot_rect)
+        doc.close()
+        text = text.split("\n")
+        name = text[0]
+    except Exception as e:
+        print(f"Error extracting name (method 1): {e}")
+        name = " "
+    return name
+
+def extract_name_method_2(pdf_path):
     try:
         doc = fitz.open(pdf_path)
         page = doc.load_page(0)
@@ -285,32 +341,35 @@ def extract_name(pdf_path):
         text = text.split("\n")
         name = text[0]
     except Exception as e:
-        print(f"Error extracting name: {e}")
+        print(f"Error extracting name (method 2): {e}")
         name = " "
+    return name
+
+def extract_name(pdf_path,raw_text):
+    name = extract_name_method_1(pdf_path)
+    if len(name.split()) < 6 or len(name.split()) > 12:
+        name = extract_name_method_2(pdf_path)
+    if name == ' ' :
+        name = extract_name_from_ai(raw_text)
     return name
 
 if __name__ == "__main__":
     file_path = 'C:/Work/upwork/price-scraper/Data_extraction/excel_file/USR.xlsx'
     df = pd.read_excel(file_path)
-   
     images_api_key = str(os.getenv("IMAGES_API_KEY"))
     filtered_df = df[df['Specsheet'].notna()]
-    max_rows_to_process = 5  
+    max_rows_to_process = 50  
     for idx, row in filtered_df.head(max_rows_to_process).iterrows():
         pdf_url = row['Specsheet']
         pdf_path = download_pdf(pdf_url)
         code = row['SKU']
-        capture_screenshots(pdf_path)
-        image_links = generate_image_links(images_api_key,pdf_path)
         raw_text = extract_text_from_pdf(pdf_path)
-        name = extract_name(pdf_path)
-        features = process_text(raw_text, code)
+        name = extract_name(pdf_path,raw_text)
+        features = extract_features_list(raw_text)
         specification = extract_specification_from_table(pdf_path)
         description = extract_description(raw_text)
         specifications = extract_specifications(specification)
-        features_html_list = extract_features_list(features)
-
-        update_excel_row(file_path, idx, name, description, features_html_list, specifications,image_links)
+        update_excel_row(file_path, idx, name, description, features, specifications)
 
 
 
