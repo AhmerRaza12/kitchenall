@@ -11,10 +11,15 @@ from openai import OpenAI
 import dotenv
 import pandas as pd
 from PIL import Image, ImageFile
-import io
 from spire.pdf.common import *
 from spire.pdf import *
-import pymupdf
+import pytesseract
+import cv2
+import numpy as np
+import subprocess
+from pdfminer.high_level import extract_pages
+from pdfminer.layout import LTImage, LTPage, LTFigure
+import io
 
 dotenv.load_dotenv()
 openai_api_key = str(os.getenv("OPENAI_API_KEY"))
@@ -34,107 +39,44 @@ def download_pdf(url):
     
     return pdf_path
 
-ImageFile.LOAD_TRUNCATED_IMAGES = True
 def extract_images_from_pdf(pdf_path):
     try:
-        pdf_file = fitz.open(pdf_path)
-        if not os.path.exists("image_files"):
-            os.makedirs("image_files")
+        document = fitz.open(pdf_path)
+        if not os.path.exists('image_files'):
+            os.makedirs('image_files')
+        for page_index in range(len(document)):
+            page = document[page_index]
+            
+   
+            image_list = page.get_images(full=True)
+            print(f"Found {len(image_list)} images on page {page_index + 1}.")
+            for image_index, img in enumerate(image_list):
+                xref = img[0]
+                base_image = document.extract_image(xref)
+                image_bytes = base_image["image"]
+                image_ext = base_image["ext"]
+                if not image_bytes:
+                    print(f"Skipping empty image on page {page_index + 1}, image {image_index + 1}.")
+                    continue
+                image_path = os.path.join('image_files', f'page_{page_index + 1}_image_{image_index + 1}.{image_ext}')
+                with open(image_path, "wb") as image_file:
+                    image_file.write(image_bytes)
+                print(f"Saved image: {image_path}")
+                if image_ext.lower() in ['jpx', 'jpeg2000', 'jp2']:
+                    image_path_jpg = os.path.join('image_files', f'page_{page_index + 1}_image_{image_index + 1}.jpg')
+                    try:
+                        subprocess.run(['magick', 'convert', image_path, image_path_jpg])
+                        print(f"Converted image to jpg: {image_path_jpg}")
+                        os.remove(image_path)
+                        image_path = image_path_jpg
+                    except Exception as e:
+                        print(f"Error converting {image_path} to JPEG: {e}")
 
-        for page_number in range(len(pdf_file)):
-            page = pdf_file.load_page(page_number)
-            page_width = page.rect.width
-            page_height = page.rect.height
-            screenshot_rect = fitz.Rect(0, 0, page_width, page_height)
-            filename = os.path.basename(pdf_path)
-            # remove the extension
-            filename = os.path.splitext(filename)[0]
-            print(filename)
-            # images should be saved in image_files/filename/page_number_image.jpg
-            if not os.path.exists(f"image_files/{filename}"):
-                os.makedirs(f"image_files/{filename}")
+        print(f"Images extracted and saved in: {os.path.abspath('image_files')}")
 
-            image_path = f"image_files/{filename}/{page_number}_image.jpg"
-
-            pixmap = page.get_pixmap()
-            img = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
-            img.save(image_path)
-            print(f"Image saved: {image_path}")
-
-        pdf_file.close()
-    
     except Exception as e:
         print(f"Error extracting images from PDF: {e}")
-def capture_screenshots(pdf_path):
-    try:
-        pdf_file = fitz.open(pdf_path)
-        if not os.path.exists("image_files"):
-            os.makedirs("image_files")
 
-        for page_number in range(len(pdf_file)):
-            page = pdf_file.load_page(page_number)
-            page_width = page.rect.width
-            page_height = page.rect.height
-            
-            if page_number == 0:
-        
-                reduced_height = page_height * 0.6
-                top_margin = (page_height - reduced_height) / 2
-                bottom_margin = page_height - top_margin
-            
-                screenshot_rect = fitz.Rect(0, top_margin, page_width // 2, bottom_margin)
-                filename = os.path.basename(pdf_path)
-                # remove the extension
-                filename = os.path.splitext(filename)[0]
-                print(filename)
-                # images should be saved in image_files/filename/page_number_image_1.jpg
-                if not os.path.exists(f"image_files/{filename}"):
-                    os.makedirs(f"image_files/{filename}")
-
-                image_path = f"image_files/{filename}/image_1.jpg"
-
-                
-        
-                pixmap = page.get_pixmap()
-                img = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
-                
-                
-                img_cropped = img.crop((screenshot_rect.x0, screenshot_rect.y0, screenshot_rect.x1, screenshot_rect.y1))
-                img_cropped.save(image_path)
-                print(f"Image saved: {image_path}")
-
-            elif page_number == 1:
-                # Reduce page height by 20% from top and bottom
-                reduced_height = page_height * 0.8
-                top_margin = (page_height - reduced_height) / 2
-                bottom_margin = page_height - top_margin
-                right_half_width = page_width // 2
-                screenshot_rect_1 = fitz.Rect(right_half_width, top_margin, page_width, top_margin + reduced_height / 2)
-                screenshot_rect_2 = fitz.Rect(right_half_width, top_margin + reduced_height / 2, page_width, bottom_margin)
-                
-                # Render page to image
-                pixmap = page.get_pixmap()
-                img = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
-                
-                # Crop and save top half of the right side
-                img_cropped_1 = img.crop((screenshot_rect_1.x0, screenshot_rect_1.y0, screenshot_rect_1.x1, screenshot_rect_1.y1))
-                image_path_1 = f"image_files/{filename}/image_2.jpg"
-                img_cropped_1.save(image_path_1)
-                print(f"Image saved: {image_path_1}")
-
-                # Crop and save bottom half of the right side
-                img_cropped_2 = img.crop((screenshot_rect_2.x0, screenshot_rect_2.y0, screenshot_rect_2.x1, screenshot_rect_2.y1))
-                image_path_2 = f"image_files/{filename}/image_3.jpg"
-                img_cropped_2.save(image_path_2)
-                print(f"Image saved: {image_path_2}")
-
-            else:
-                break  
-
-        pdf_file.close()
-    
-    except Exception as e:
-        print(f"Error capturing screenshots from PDF: {e}")
  
 def upload_image_to_freeimage(image_path, api_key):
     """Uploads an image to FreeImage.host and returns the direct image link."""
@@ -357,19 +299,22 @@ if __name__ == "__main__":
     file_path = 'C:/Work/upwork/price-scraper/Data_extraction/excel_file/USR.xlsx'
     df = pd.read_excel(file_path)
     images_api_key = str(os.getenv("IMAGES_API_KEY"))
-    filtered_df = df[df['Specsheet'].notna()]
-    max_rows_to_process = 50  
-    for idx, row in filtered_df.head(max_rows_to_process).iterrows():
-        pdf_url = row['Specsheet']
-        pdf_path = download_pdf(pdf_url)
-        code = row['SKU']
-        raw_text = extract_text_from_pdf(pdf_path)
-        name = extract_name(pdf_path,raw_text)
-        features = extract_features_list(raw_text)
-        specification = extract_specification_from_table(pdf_path)
-        description = extract_description(raw_text)
-        specifications = extract_specifications(specification)
-        update_excel_row(file_path, idx, name, description, features, specifications)
+    pdf_path = 'pdf_files/stilo-series-specsheet.pdf'
+    extract_images_from_pdf(pdf_path)
+    
+    # filtered_df = df[df['Specsheet'].notna()]
+    # max_rows_to_process = 50  
+    # for idx, row in filtered_df.head(max_rows_to_process).iterrows():
+    #     pdf_url = row['Specsheet']
+    #     pdf_path = download_pdf(pdf_url)
+    #     code = row['SKU']
+    #     raw_text = extract_text_from_pdf(pdf_path)
+    #     name = extract_name(pdf_path,raw_text)
+    #     features = extract_features_list(raw_text)
+    #     specification = extract_specification_from_table(pdf_path)
+    #     description = extract_description(raw_text)
+    #     specifications = extract_specifications(specification)
+    #     update_excel_row(file_path, idx, name, description, features, specifications)
 
 
 
