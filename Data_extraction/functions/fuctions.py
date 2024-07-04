@@ -11,15 +11,8 @@ from openai import OpenAI
 import dotenv
 import pandas as pd
 from PIL import Image, ImageFile
-from spire.pdf.common import *
-from spire.pdf import *
-import pytesseract
-import cv2
-import numpy as np
 import subprocess
-from pdfminer.high_level import extract_pages
-from pdfminer.layout import LTImage, LTPage, LTFigure
-import io
+
 
 dotenv.load_dotenv()
 openai_api_key = str(os.getenv("OPENAI_API_KEY"))
@@ -42,28 +35,41 @@ def download_pdf(url):
 def extract_images_from_pdf(pdf_path):
     try:
         document = fitz.open(pdf_path)
-        if not os.path.exists('image_files'):
-            os.makedirs('image_files')
+        pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
+        images_dir = os.path.join('image_files', pdf_name)
+        
+        if not os.path.exists(images_dir):
+            os.makedirs(images_dir)
+        
+        image_count = 0
+        
         for page_index in range(len(document)):
             page = document[page_index]
-            
-   
             image_list = page.get_images(full=True)
-            print(f"Found {len(image_list)} images on page {page_index + 1}.")
+            
+            
             for image_index, img in enumerate(image_list):
+                if image_count >= 3:
+                    break
+                
                 xref = img[0]
                 base_image = document.extract_image(xref)
                 image_bytes = base_image["image"]
                 image_ext = base_image["ext"]
+                width = base_image["width"]
+                height = base_image["height"]
+                
                 if not image_bytes:
-                    print(f"Skipping empty image on page {page_index + 1}, image {image_index + 1}.")
-                    continue
-                image_path = os.path.join('image_files', f'page_{page_index + 1}_image_{image_index + 1}.{image_ext}')
+                    continue 
+                if width <= 200 or height <= 200:
+                    continue   
+                image_count += 1
+                image_path = os.path.join(images_dir, f'image{image_count}.{image_ext}')
                 with open(image_path, "wb") as image_file:
                     image_file.write(image_bytes)
-                print(f"Saved image: {image_path}")
+
                 if image_ext.lower() in ['jpx', 'jpeg2000', 'jp2']:
-                    image_path_jpg = os.path.join('image_files', f'page_{page_index + 1}_image_{image_index + 1}.jpg')
+                    image_path_jpg = os.path.join(images_dir, f'image{image_count}.jpg')
                     try:
                         subprocess.run(['magick', 'convert', image_path, image_path_jpg])
                         print(f"Converted image to jpg: {image_path_jpg}")
@@ -71,9 +77,10 @@ def extract_images_from_pdf(pdf_path):
                         image_path = image_path_jpg
                     except Exception as e:
                         print(f"Error converting {image_path} to JPEG: {e}")
-
-        print(f"Images extracted and saved in: {os.path.abspath('image_files')}")
-
+            
+            if image_count >= 3:
+                break
+    
     except Exception as e:
         print(f"Error extracting images from PDF: {e}")
 
@@ -103,7 +110,10 @@ def upload_image_to_freeimage(image_path, api_key):
 def generate_image_links(api_key,pdf_path):
     filename = os.path.basename(pdf_path)
     filename = os.path.splitext(filename)[0]
-    image_files = [f"image_files/{filename}/image_1.jpg", f"image_files/{filename}/image_2.jpg", f"image_files/{filename}/image_3.jpg"]
+    
+    pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
+    image_files = [os.path.join('image_files', pdf_name, image_file) for image_file in os.listdir(os.path.join('image_files', pdf_name))]
+    print(len(image_files))
     image_links = []
 
     for image_file in image_files:
@@ -134,7 +144,8 @@ def extract_specifications(specification):
     try:
         specification_text = "\n".join(specification)
         messages = [
-            {"role": "system", "content": "Extract specifications in HTML table format carefully as the cell maybe out of order. no th headings just td tags in table and all td tags should have some content Inner text.  If 2 first td's in a tr have same name then make only one tr and put the second tds in the same place with br tag. If found multiple SKU's or products, keep them in separate tables each with their own specifications. If there is no table found in the input, return 'None' as the output."},
+            # we can change the prompt in the following line
+            {"role": "system", "content": "Extract specifications in HTML table format carefully as the cell maybe out of order. no th headings just td tags in table and all td tags should have some content Inner text.  If 2 first td's in a tr have same name then make only one tr and put the second tds in the same place with br tag. If found multiple SKU's or products, keep them in same table with multiple tds/column each model seperated by row/<tr> each with their own specifications Return in <table>. If there is no table found in the input, return 'None' as the output. "},
             {"role": "user", "content": specification_text}
         ]
         response = client.chat.completions.create(
@@ -142,6 +153,7 @@ def extract_specifications(specification):
             messages=messages,
             temperature=0.0  
         )
+    
         html_table = response.choices[0].message.content
         
         return html_table  
@@ -152,7 +164,8 @@ def extract_specifications(specification):
 def extract_features_list(raw_text):
     try:
         messages = [
-            {"role": "system", "content": "Extract features in HTML list format. Use 'li' tags for each feature inside the ul Features. In the raw text, the features are listed in bullet points. Extract the features and present them in an HTML list. If there are multiple products or SKUs, extract the features for the given product only. If the features are not in bullet points, generate them as bullet points. Not more than 10 features. Return each li in a ul format."},
+            # we can change the prompt in the following line
+            {"role": "system", "content": "Extract features in HTML list format. Use 'li' tags for each feature inside the ul Features. In the raw text, the features are listed in bullet points. Extract the features and present them in an HTML list. If there are multiple products or SKUs, extract the features for the given product only. If the features are not in bullet points, generate them as bullet points. Not more than 10 features. Return each feature in an <li> tag inside a <ul> tag."},
             {"role": "user", "content": raw_text}
         ]
         response = client.chat.completions.create(
@@ -170,6 +183,7 @@ def extract_features_list(raw_text):
 def extract_description(raw_text):
     try:
         messages = [
+            # we can change the prompt in the following line
             {"role": "system", "content": "Extract the description of the product. The description should be in a single paragraph. and not more than 4 lines see the text and extract description."},
             {"role": "user", "content": raw_text}
         ]
@@ -222,11 +236,9 @@ def extract_specification_from_table(pdf_path):
             else:
                 print("No tables found on page.")
 
-        # Extract tables from the first page
         first_page = doc.load_page(0)
         extract_tables_from_page(first_page)
 
-        # If no tables found on the first page, try the second page
         if not specifications and len(doc) > 1:
             second_page = doc.load_page(1)
             extract_tables_from_page(second_page)
@@ -241,13 +253,18 @@ def extract_specification_from_table(pdf_path):
 
     return specifications
 
-def update_excel_row(file_path, row_index, name, description, features, specifications):
+def update_excel_row(file_path, row_index, image_links, specifications,name,features,description):
     try:
         df = pd.read_excel(file_path)
         df.at[row_index, 'Name'] = name
         df.at[row_index, 'Features'] = features
         df.at[row_index, 'Description'] = description
         df.at[row_index, 'Specifications'] = specifications
+        for i in range(3):
+            if i < len(image_links):
+                df.at[row_index, f'Image {i+1}'] = image_links[i]
+            else:
+                df.at[row_index, f'Image {i+1}'] = ""
         df.to_excel(file_path, index=False)
         print(f"Updated Excel row {row_index} successfully.")
     except Exception as e:
@@ -297,24 +314,27 @@ def extract_name(pdf_path,raw_text):
 
 if __name__ == "__main__":
     file_path = 'C:/Work/upwork/price-scraper/Data_extraction/excel_file/USR.xlsx'
+    images_api_key = str(os.getenv("IMAGES_API_KEY"))
     df = pd.read_excel(file_path)
     images_api_key = str(os.getenv("IMAGES_API_KEY"))
-    pdf_path = 'pdf_files/stilo-series-specsheet.pdf'
-    extract_images_from_pdf(pdf_path)
-    
-    # filtered_df = df[df['Specsheet'].notna()]
-    # max_rows_to_process = 50  
-    # for idx, row in filtered_df.head(max_rows_to_process).iterrows():
-    #     pdf_url = row['Specsheet']
-    #     pdf_path = download_pdf(pdf_url)
-    #     code = row['SKU']
-    #     raw_text = extract_text_from_pdf(pdf_path)
-    #     name = extract_name(pdf_path,raw_text)
-    #     features = extract_features_list(raw_text)
-    #     specification = extract_specification_from_table(pdf_path)
-    #     description = extract_description(raw_text)
-    #     specifications = extract_specifications(specification)
-    #     update_excel_row(file_path, idx, name, description, features, specifications)
+    filtered_df = df[df['Specsheet'].notna()]
+    start_row = 241
+    end_row = 328
+    for idx, row in filtered_df.iterrows():
+        pdf_url = row['Specsheet']
+        pdf_path = download_pdf(pdf_url)
+        raw_text = extract_text_from_pdf(pdf_path)
+        if not raw_text:
+            print(f"Skipping row {idx} due to failed text extraction.")
+            continue
+        name = extract_name(pdf_path, raw_text)
+        features = extract_features_list(raw_text)
+        specification = extract_specification_from_table(pdf_path)
+        description = extract_description(raw_text)
+        specifications = extract_specifications(specification)
+        extract_images_from_pdf(pdf_path)
+        image_links = generate_image_links(images_api_key, pdf_path)
+        update_excel_row(file_path, idx, image_links, specifications,name,features,description)
 
 
 
